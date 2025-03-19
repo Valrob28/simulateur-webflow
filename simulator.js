@@ -119,6 +119,83 @@ const config = {
   ]
 };
 
+// Variable globale pour éviter les doublons
+let simulatorInitialized = false;
+
+// Fonction pour rechercher sur Yahoo Finance
+async function searchYahooFinance(query) {
+  try {
+    const response = await fetch(`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&lang=fr-FR&region=FR&quotesCount=6&newsCount=0&enableFuzzyQuery=false&quotesQueryId=tss_match_phrase_query`);
+    const data = await response.json();
+    return data.quotes || [];
+  } catch (error) {
+    console.error('Erreur lors de la recherche Yahoo Finance:', error);
+    return [];
+  }
+}
+
+// Fonction pour obtenir les données historiques
+async function getHistoricalData(symbol, startDate, endDate) {
+  try {
+    const response = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${startDate}&period2=${endDate}&interval=1d`);
+    const data = await response.json();
+    return data.chart.result[0];
+  } catch (error) {
+    console.error('Erreur lors de la récupération des données historiques:', error);
+    return null;
+  }
+}
+
+// Fonction pour calculer la performance avec les données historiques
+async function calculatePerformanceWithHistory(investment, startYear, endYear, symbol) {
+  const startDate = new Date(startYear, 0, 1).getTime() / 1000;
+  const endDate = new Date(endYear, 11, 31).getTime() / 1000;
+  
+  const historicalData = await getHistoricalData(symbol, startDate, endDate);
+  
+  if (!historicalData) {
+    return { totalValue: investment, annualReturn: 0 };
+  }
+  
+  const timestamps = historicalData.timestamp;
+  const prices = historicalData.indicators.quote[0].close;
+  
+  // Trouver le premier prix valide
+  let firstValidIndex = 0;
+  while (firstValidIndex < prices.length && prices[firstValidIndex] === null) {
+    firstValidIndex++;
+  }
+  
+  // Trouver le dernier prix valide
+  let lastValidIndex = prices.length - 1;
+  while (lastValidIndex > firstValidIndex && prices[lastValidIndex] === null) {
+    lastValidIndex--;
+  }
+  
+  if (firstValidIndex >= lastValidIndex) {
+    return { totalValue: investment, annualReturn: 0 };
+  }
+  
+  const firstPrice = prices[firstValidIndex];
+  const lastPrice = prices[lastValidIndex];
+  
+  // Calculer le nombre d'années exact
+  const firstDate = new Date(timestamps[firstValidIndex] * 1000);
+  const lastDate = new Date(timestamps[lastValidIndex] * 1000);
+  const years = (lastDate - firstDate) / (1000 * 60 * 60 * 24 * 365.25);
+  
+  // Calculer la valeur totale
+  const totalValue = investment * (lastPrice / firstPrice);
+  
+  // Calculer le rendement annuel
+  const annualReturn = ((Math.pow(totalValue / investment, 1 / years) - 1) * 100);
+  
+  return {
+    totalValue: Math.round(totalValue),
+    annualReturn: Math.round(annualReturn * 100) / 100
+  };
+}
+
 // Fonction pour créer le HTML du simulateur
 function createSimulatorHTML() {
   return `
@@ -129,8 +206,24 @@ function createSimulatorHTML() {
         <div class="input-group">
           <label>Rechercher une action</label>
           <div class="search-wrapper">
-            <input type="text" id="searchInput" placeholder="Bitcoin, Ethereum, Solana...">
-            <div class="search-results" id="searchResults"></div>
+            <div class="search-input-container">
+              <input type="text" id="searchInput" placeholder="Bitcoin, Ethereum, Solana...">
+              <div class="search-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+              </div>
+            </div>
+            <div class="search-results" id="searchResults">
+              <div class="search-loading" style="display: none;">
+                <div class="spinner"></div>
+                <span>Recherche en cours...</span>
+              </div>
+              <div class="search-error" style="display: none;">
+                <span>Une erreur est survenue. Veuillez réessayer.</span>
+              </div>
+            </div>
           </div>
         </div>
         <div class="selected-action" id="selectedAction">
@@ -205,6 +298,19 @@ function createSimulatorCSS() {
       position: relative;
     }
 
+    .search-input-container {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-icon {
+      position: absolute;
+      right: 12px;
+      color: #666;
+      pointer-events: none;
+    }
+
     .search-results {
       position: absolute;
       top: 100%;
@@ -214,7 +320,7 @@ function createSimulatorCSS() {
       border: 1px solid #ddd;
       border-radius: 4px;
       margin-top: 4px;
-      max-height: 200px;
+      max-height: 300px;
       overflow-y: auto;
       display: none;
       z-index: 1000;
@@ -229,10 +335,61 @@ function createSimulatorCSS() {
       padding: 0.75rem;
       cursor: pointer;
       transition: background-color 0.2s ease;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
     .search-result-item:hover {
       background-color: #f8f9fa;
+    }
+
+    .search-result-item .symbol {
+      font-weight: 600;
+      color: #333;
+      min-width: 60px;
+    }
+
+    .search-result-item .name {
+      color: #666;
+      flex-grow: 1;
+    }
+
+    .search-result-item .exchange {
+      font-size: 0.8rem;
+      color: #999;
+      text-transform: uppercase;
+    }
+
+    .search-loading {
+      padding: 1rem;
+      text-align: center;
+      color: #666;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid #f3f3f3;
+      border-top: 2px solid #4CAF50;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .search-error {
+      padding: 1rem;
+      text-align: center;
+      color: #dc3545;
     }
 
     .selected-action {
@@ -365,98 +522,45 @@ function createSimulatorCSS() {
         grid-template-columns: 1fr;
       }
     }
-
-    .search-category-header {
-      padding: 0.5rem 0.75rem;
-      background-color: #f0f0f0;
-      font-weight: 600;
-      color: #666;
-      font-size: 0.9rem;
-      border-bottom: 1px solid #ddd;
-    }
-
-    .search-result-item {
-      padding: 0.75rem;
-      cursor: pointer;
-      transition: background-color 0.2s ease;
-      border-bottom: 1px solid #eee;
-    }
-
-    .search-result-item:last-child {
-      border-bottom: none;
-    }
-
-    .search-result-item strong {
-      color: #333;
-      display: block;
-      margin-bottom: 0.25rem;
-    }
-
-    .search-result-item small {
-      color: #666;
-    }
   `;
-}
-
-// Fonction pour filtrer les actions
-function filterActions(searchTerm) {
-  return config.actions.filter(action => 
-    action.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    action.id.toLowerCase().includes(searchTerm.toLowerCase())
-  );
 }
 
 // Fonction pour afficher les résultats de recherche
 function displaySearchResults(results) {
   const searchResults = document.getElementById('searchResults');
+  const loadingElement = searchResults.querySelector('.search-loading');
+  const errorElement = searchResults.querySelector('.search-error');
+  
   searchResults.innerHTML = '';
   
   if (results.length === 0) {
     searchResults.innerHTML = '<div class="search-result-item">Aucun résultat trouvé</div>';
   } else {
-    // Grouper les résultats par catégorie
-    const groupedResults = results.reduce((acc, action) => {
-      const category = action.category;
-      if (!acc[category]) {
-        acc[category] = [];
-      }
-      acc[category].push(action);
-      return acc;
-    }, {});
-
-    // Afficher les résultats groupés
-    Object.entries(groupedResults).forEach(([category, actions]) => {
-      const categoryHeader = document.createElement('div');
-      categoryHeader.className = 'search-category-header';
-      categoryHeader.textContent = category === 'crypto' ? 'Cryptomonnaies' :
-                                 category === 'etf' ? 'ETF' :
-                                 category === 'cac40' ? 'CAC 40' : 'Autres';
-      searchResults.appendChild(categoryHeader);
-
-      actions.forEach(action => {
-        const div = document.createElement('div');
-        div.className = 'search-result-item';
-        div.innerHTML = `
-          <strong>${action.name}</strong> (${action.id})
-          <br>
-          <small>${action.description}</small>
-        `;
-        div.addEventListener('click', () => selectAction(action));
-        searchResults.appendChild(div);
-      });
+    results.forEach(result => {
+      const div = document.createElement('div');
+      div.className = 'search-result-item';
+      div.innerHTML = `
+        <span class="symbol">${result.symbol}</span>
+        <span class="name">${result.longname || result.shortname}</span>
+        <span class="exchange">${result.exchange}</span>
+      `;
+      div.addEventListener('click', () => selectAction(result));
+      searchResults.appendChild(div);
     });
   }
   
   searchResults.classList.add('active');
+  loadingElement.style.display = 'none';
+  errorElement.style.display = 'none';
 }
 
 // Fonction pour sélectionner une action
-function selectAction(action) {
+async function selectAction(action) {
   const selectedAction = document.getElementById('selectedAction');
   selectedAction.innerHTML = `
     <div class="action-info">
-      <h3>${action.name} (${action.id})</h3>
-      <p class="action-description">${action.description}</p>
+      <h3>${action.longname || action.shortname} (${action.symbol})</h3>
+      <p class="action-description">${action.exchange}</p>
     </div>
   `;
   
@@ -464,46 +568,54 @@ function selectAction(action) {
   document.getElementById('searchInput').value = '';
   
   // Stocker l'action sélectionnée
-  selectedAction.dataset.actionId = action.id;
+  selectedAction.dataset.actionId = action.symbol;
   
-  // Mettre à jour les résultats
-  updateResults();
+  // Mettre à jour les résultats avec les données historiques
+  await updateResultsWithHistory();
 }
 
-// Fonction pour calculer la performance
-function calculatePerformance(investment, startYear, endYear, actionId) {
-  const years = endYear - startYear;
-  const action = config.actions.find(a => a.id === actionId);
-  
-  if (!action) return { totalValue: 0, annualReturn: 0 };
-  
-  const positiveVoteRatio = action.positiveVotes / (action.positiveVotes + action.negativeVotes);
-  const annualReturnRate = positiveVoteRatio * 0.15;
-  const totalValue = investment * Math.pow(1 + annualReturnRate, years);
-  
-  return {
-    totalValue: Math.round(totalValue),
-    annualReturn: Math.round(annualReturnRate * 100)
-  };
-}
-
-// Fonction pour mettre à jour les résultats
-function updateResults() {
+// Fonction pour mettre à jour les résultats avec les données historiques
+async function updateResultsWithHistory() {
   const investment = Number(document.getElementById('investment').value);
   const startYear = Number(document.getElementById('startYear').value);
   const endYear = Number(document.getElementById('endYear').value);
   const selectedAction = document.getElementById('selectedAction');
   const actionId = selectedAction.dataset.actionId;
   
-  const performance = calculatePerformance(investment, startYear, endYear, actionId);
+  if (!actionId) return;
   
-  document.getElementById('totalValue').textContent = `${performance.totalValue}€`;
-  document.getElementById('annualReturn').textContent = `${performance.annualReturn}%`;
-  document.getElementById('endYearLabel').textContent = `Au ${endYear}`;
+  // Afficher un indicateur de chargement
+  document.getElementById('totalValue').textContent = 'Calcul...';
+  document.getElementById('annualReturn').textContent = 'Calcul...';
+  
+  try {
+    const performance = await calculatePerformanceWithHistory(investment, startYear, endYear, actionId);
+    
+    // Formater les nombres avec des séparateurs de milliers
+    const formattedTotalValue = performance.totalValue.toLocaleString('fr-FR');
+    const formattedAnnualReturn = performance.annualReturn.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    
+    document.getElementById('totalValue').textContent = `${formattedTotalValue}€`;
+    document.getElementById('annualReturn').textContent = `${formattedAnnualReturn}%`;
+    document.getElementById('endYearLabel').textContent = `Au ${endYear}`;
+  } catch (error) {
+    console.error('Erreur lors du calcul des performances:', error);
+    document.getElementById('totalValue').textContent = 'Erreur';
+    document.getElementById('annualReturn').textContent = 'Erreur';
+  }
 }
 
 // Fonction pour initialiser le simulateur
 function initSimulator(containerId) {
+  // Vérifier si le simulateur est déjà initialisé
+  if (simulatorInitialized) {
+    console.log('Le simulateur est déjà initialisé');
+    return;
+  }
+  
+  // Marquer le simulateur comme initialisé
+  simulatorInitialized = true;
+
   // Créer et ajouter le CSS
   const style = document.createElement('style');
   style.textContent = createSimulatorCSS();
@@ -511,6 +623,11 @@ function initSimulator(containerId) {
 
   // Créer et ajouter le HTML
   const container = document.getElementById(containerId);
+  if (!container) {
+    console.error('Container not found:', containerId);
+    return;
+  }
+  
   container.innerHTML = createSimulatorHTML();
 
   // Remplir les sélecteurs d'années
@@ -538,46 +655,99 @@ function initSimulator(containerId) {
 
   // Gérer la recherche
   const searchInput = document.getElementById('searchInput');
+  const searchResults = document.getElementById('searchResults');
+  const loadingElement = searchResults.querySelector('.search-loading');
+  const errorElement = searchResults.querySelector('.search-error');
   let searchTimeout;
 
-  searchInput.addEventListener('input', (e) => {
+  searchInput.addEventListener('input', async (e) => {
     clearTimeout(searchTimeout);
     const searchTerm = e.target.value;
     
     if (searchTerm.length < 2) {
-      document.getElementById('searchResults').classList.remove('active');
+      searchResults.classList.remove('active');
       return;
     }
     
-    searchTimeout = setTimeout(() => {
-      const results = filterActions(searchTerm);
-      displaySearchResults(results);
-    }, 300);
+    loadingElement.style.display = 'flex';
+    errorElement.style.display = 'none';
+    searchResults.classList.add('active');
+    
+    try {
+      searchTimeout = setTimeout(async () => {
+        const results = await searchYahooFinance(searchTerm);
+        displaySearchResults(results);
+      }, 300);
+    } catch (error) {
+      loadingElement.style.display = 'none';
+      errorElement.style.display = 'block';
+      console.error('Erreur lors de la recherche:', error);
+    }
   });
 
   // Fermer les résultats de recherche en cliquant en dehors
   document.addEventListener('click', (e) => {
-    const searchResults = document.getElementById('searchResults');
-    const searchInput = document.getElementById('searchInput');
-    
     if (!searchResults.contains(e.target) && e.target !== searchInput) {
       searchResults.classList.remove('active');
     }
   });
 
   // Ajouter les écouteurs d'événements
-  document.getElementById('investment').addEventListener('input', updateResults);
-  startYearSelect.addEventListener('change', updateResults);
-  endYearSelect.addEventListener('change', updateResults);
+  document.getElementById('investment').addEventListener('input', updateResultsWithHistory);
+  startYearSelect.addEventListener('change', updateResultsWithHistory);
+  endYearSelect.addEventListener('change', updateResultsWithHistory);
 }
 
 // Code pour l'intégration dans Webflow
-window.addEventListener('DOMContentLoaded', () => {
-  // Créer un conteneur pour le simulateur
-  const container = document.createElement('div');
-  container.id = 'simulator-container';
-  document.body.appendChild(container);
+(function() {
+  // Vérifier si le simulateur est déjà initialisé
+  if (window.simulatorInitialized) {
+    console.log('Le simulateur est déjà initialisé');
+    return;
+  }
 
-  // Initialiser le simulateur
-  initSimulator('simulator-container');
-}); 
+  // Marquer le simulateur comme initialisé globalement
+  window.simulatorInitialized = true;
+
+  // Fonction pour nettoyer les conteneurs existants
+  function cleanupExistingContainers() {
+    const existingContainers = document.querySelectorAll('#simulator-container');
+    existingContainers.forEach(container => {
+      container.remove();
+    });
+  }
+
+  // Fonction pour initialiser le simulateur une seule fois
+  function initializeSimulator() {
+    // Nettoyer les conteneurs existants
+    cleanupExistingContainers();
+
+    // Vérifier si le conteneur cible existe
+    const targetContainer = document.getElementById('simulator-target');
+    if (!targetContainer) {
+      console.log('Le conteneur cible (simulator-target) n\'existe pas');
+      return;
+    }
+
+    // Vider le conteneur cible
+    targetContainer.innerHTML = '';
+
+    // Créer le conteneur du simulateur
+    const container = document.createElement('div');
+    container.id = 'simulator-container';
+    targetContainer.appendChild(container);
+
+    // Initialiser le simulateur
+    initSimulator('simulator-container');
+  }
+
+  // Attendre que le DOM soit complètement chargé
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeSimulator);
+  } else {
+    initializeSimulator();
+  }
+
+  // Nettoyer les conteneurs lors du déchargement de la page
+  window.addEventListener('unload', cleanupExistingContainers);
+})(); 
